@@ -7,8 +7,10 @@ name: release
 #   push: tags v*     -> resolve -> publish -> github-release -> verify-release
 #   workflow_dispatch -> the same, against the `tag` input
 #
-# ci.yml pushes the bump tag with PSONET_REPO_TOKEN (a PAT), not the default
-# GITHUB_TOKEN: only a PAT-authored tag push fires this workflow. See ci.yml.
+# ci.yml cuts the tag with GITHUB_TOKEN and then DISPATCHES this workflow
+# against it. GitHub does not trigger a workflow from a push authenticated with
+# the default token — its anti-recursion rule — so the `push: tags` trigger
+# below only fires for a tag a human pushed. Both paths land in `resolve`.
 #
 # No lint or tests here. The commit the tag points at already passed ci.yml
 # before the tag existed, so re-running them would only add a way for a release

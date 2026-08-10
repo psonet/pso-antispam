@@ -23,8 +23,8 @@ pre_bump_hooks = [
 ]
 
 # After cog bumps the version + writes the tag, push both back to
-# the remote so the tag-triggered `publish` + `github-release` jobs
-# in ci.yml can pick the new tag up. The post_bump_hooks also let a
+# the remote. ci.yml then dispatches release.yml against that tag
+# (a GITHUB_TOKEN push cannot trigger a workflow on its own). The post_bump_hooks also let a
 # maintainer running `cog bump --auto` locally get the same end
 # state.
 post_bump_hooks = [
