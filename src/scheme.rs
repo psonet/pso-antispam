@@ -74,7 +74,57 @@ impl PowScheme {
             Self::Hashcash => hashcash::verify(input, solution, difficulty),
         }
     }
+
+    /// Solve for this scheme, writing the solution into `out`.
+    ///
+    /// Returns `false` without touching `out` if the scheme cannot be solved
+    /// (retired) or `out` is not exactly [`solution_len`](Self::solution_len)
+    /// bytes.
+    ///
+    /// This exists so a client can solve for *whatever scheme the node asks
+    /// for*. Without it, [`verify`](Self::verify) is scheme-generic but solving
+    /// is not — every wallet has to name a concrete scheme and call its
+    /// module directly, which re-creates exactly the hard-coding this crate was
+    /// extracted to remove. A second scheme would then need a change in every
+    /// client rather than only here.
+    ///
+    /// Alloc-free by design: the caller owns the buffer, so this works
+    /// unchanged in a `no_std` wallet. Size it with `solution_len()`.
+    ///
+    /// Expected cost is about `difficulty` hashes, so treat it as blocking
+    /// work rather than something to run on an interactive thread.
+    ///
+    /// ```
+    /// use pso_antispam::PowScheme;
+    /// let scheme = PowScheme::Hashcash;
+    /// let input = [0x11u8; 32];
+    /// let mut solution = [0u8; 8];
+    /// assert_eq!(solution.len(), scheme.solution_len());
+    /// assert!(scheme.solve_into(&input, 1_024, &mut solution));
+    /// assert!(scheme.verify(&input, &solution, 1_024));
+    /// ```
+    pub fn solve_into(self, input: &[u8; 32], difficulty: Difficulty, out: &mut [u8]) -> bool {
+        if out.len() != self.solution_len() || difficulty == 0 {
+            return false;
+        }
+        match self {
+            // Retired, and deliberately unsolvable here: handing a caller a
+            // forgeable proof would defeat the point of retiring it.
+            Self::MinRoot => false,
+            Self::Hashcash => {
+                out.copy_from_slice(&hashcash::solve(input, difficulty));
+                true
+            }
+        }
+    }
 }
+
+/// The solver writes a fixed-width nonce, and `solution_len` is what every
+/// caller sizes its buffer with. If those two ever disagree, `solve_into`
+/// would either panic on the copy or silently produce a solution the wire
+/// format rejects — so tie them together at COMPILE time rather than hoping a
+/// test covers it.
+const _: () = assert!(PowScheme::Hashcash.solution_len() == hashcash::NONCE_LEN);
 
 #[cfg(test)]
 mod tests {
@@ -116,6 +166,51 @@ mod tests {
         assert!(!PowScheme::MinRoot.verify(&INPUT, &solution, 10_000));
         // Including the degenerate all-zero pair that started SR-01.
         assert!(!PowScheme::MinRoot.verify(&INPUT, &[0u8; 96], 10_000));
+    }
+
+    /// Solve-then-verify round-trips through the generic entry points, with no
+    /// mention of a concrete scheme — which is the property that lets a client
+    /// follow whatever scheme the node asks for.
+    #[test]
+    fn solve_into_round_trips_through_verify() {
+        let scheme = PowScheme::Hashcash;
+        let t = 2_048;
+        let mut out = [0u8; 8];
+        assert_eq!(out.len(), scheme.solution_len());
+        assert!(scheme.solve_into(&INPUT, t, &mut out));
+        assert!(scheme.verify(&INPUT, &out, t));
+    }
+
+    /// A retired scheme cannot be solved. Handing a caller a forgeable proof
+    /// would defeat retiring it, so this must stay false even though the
+    /// buffer is correctly sized.
+    #[test]
+    fn a_retired_scheme_cannot_be_solved() {
+        let mut out = [0u8; 96];
+        assert_eq!(out.len(), PowScheme::MinRoot.solution_len());
+        assert!(!PowScheme::MinRoot.solve_into(&INPUT, 10_000, &mut out));
+        assert_eq!(
+            out, [0u8; 96],
+            "a refused solve must not write to the buffer"
+        );
+    }
+
+    /// A wrongly sized buffer is refused rather than partially filled — a
+    /// short write would leave the caller holding a solution that cannot
+    /// verify, with nothing to say why.
+    #[test]
+    fn solve_into_refuses_a_wrongly_sized_buffer() {
+        let scheme = PowScheme::Hashcash;
+        let mut short = [0u8; 7];
+        let mut long = [0u8; 9];
+        assert!(!scheme.solve_into(&INPUT, 64, &mut short));
+        assert!(!scheme.solve_into(&INPUT, 64, &mut long));
+        assert_eq!(short, [0u8; 7]);
+        assert_eq!(long, [0u8; 9]);
+        // Difficulty 0 is unsolvable, and must not panic the way the bare
+        // hashcash::solve does — the generic entry point answers instead.
+        let mut ok = [0u8; 8];
+        assert!(!scheme.solve_into(&INPUT, 0, &mut ok));
     }
 
     /// Difficulty 0 is never satisfiable — a target divisor of zero would
