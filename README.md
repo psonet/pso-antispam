@@ -65,14 +65,20 @@ number — but raw schemes cost wildly different amounts per unit. At
 `T = 10 000` MinRoot cost a client ~1.4 s of sequential modexps while raw
 hashcash costs ~1.4 ms, a thousandfold gap under one number.
 
-`PowScheme::work_multiplier()` normalises that (hashcash ×1024, measured:
-~140 µs per unit `T` for MinRoot against ~0.136 µs for hashcash). It is applied
+`PowScheme::work_multiplier()` normalises that (hashcash ×128). It is applied
 **inside** `verify` and `solve_into`, so the two sides cannot drift — which is
 why `hashcash` is not public: handing its raw API a lane-level `T` would produce
 a solution that is silently never admitted.
 
-Verification is unaffected at ~0.1 µs for any difficulty, so raising the
-multiplier costs the node nothing.
+×128 is a deliberate step below strict MinRoot parity (~1029). Parity measured
+at ~1.3 s per transaction at the configured floor and ~13.5 s at `T_BASE`, with
+a geometric tail near 40 s — unshippable in a wallet. ×128 puts those at ~0.17 s
+and ~1.7 s. The lane is nominally 8× cheaper to spam than MinRoot, but MinRoot's
+cost was FORGEABLE and therefore actually zero: 128 hashes an attacker must pay
+beats 1029 they can skip.
+
+Verification is unaffected at ~0.1 µs for any difficulty, so the multiplier
+costs the node nothing either way.
 
 ## Difficulty is a target divisor
 
@@ -84,10 +90,9 @@ steps.
 time is now wrong.
 
 Cost is quoted in EFFECTIVE work, i.e. after the multiplier above. At the
-configured floor `T = 10 000`, hashcash does ~10.2M hashes — roughly half a
-second on a desktop core, deliberately the same order as the MinRoot cost the
-lane was calibrated against. Raw hashcash at that `T` would be ~1.4 ms, which is
-why the multiplier exists.
+configured floor `T = 10 000`, hashcash does ~1.28M hashes — roughly 0.17 s on a
+desktop core. Raw hashcash at that `T` would be ~1.4 ms, which is why the
+multiplier exists.
 
 A 256-bit target rather than leading-zero bits is deliberate. Bits quantise
 difficulty to powers of two, and the retarget controller moves `T` by up to ±25%
