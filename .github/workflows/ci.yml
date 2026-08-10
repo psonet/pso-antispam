@@ -1,0 +1,69 @@
+name: CI
+
+# Deliberately smaller than pso-vdf's pipeline: this crate is consumed by git
+# tag, not published to crates.io, so there is no publish/release path here. Add
+# one only when a crates.io release is actually decided — an unused release job
+# that has never run is a liability, not a head start.
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint-test:
+    name: fmt + clippy + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install rust components
+        run: rustup component add rustfmt clippy
+
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+
+      # Default features = no_std. Both configurations are tested because the
+      # `std` feature changes only sha2's, and a break there would otherwise
+      # surface first in a downstream mobile build.
+      - name: Test (no_std default)
+        run: cargo test
+      - name: Test (std)
+        run: cargo test --features std
+
+  no-std:
+    name: bare-metal build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The real no_std proof. A host build of a `#![no_std]` crate still has
+      # std available to link against, so it does NOT catch an accidental std
+      # dependency — only a target without a std implementation does. The mobile
+      # wallet is the consumer that would otherwise discover this.
+      - name: Add a bare-metal target
+        run: rustup target add thumbv7em-none-eabi
+      - name: Build for thumbv7em-none-eabi
+        run: cargo build --no-default-features --target thumbv7em-none-eabi
+
+  commits:
+    name: conventional commits
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: cocogitto/cocogitto-action@v3
+        with:
+          check-latest-tag-only: false

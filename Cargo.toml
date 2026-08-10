@@ -1,0 +1,21 @@
+[package]
+name        = "pso-antispam"
+version     = "0.1.0"
+edition     = "2021"
+authors     = ["PSO Lab"]
+license     = "MIT"
+repository  = "https://github.com/psonet/pso-antispam"
+description = "no_std anonymous-lane admission contract: pluggable proof-of-work schemes, canonical input binding, and the difficulty/window policy shared by nodes and wallets"
+readme      = "README.md"
+keywords    = ["proof-of-work", "hashcash", "anti-spam", "mempool", "no-std"]
+categories  = ["cryptography", "no-std"]
+
+# no_std by default and ALLOC-FREE: every API works on fixed-size buffers, so
+# this links into a mobile/embedded wallet as-is. `std` exists only to hand
+# sha2 its std feature.
+[features]
+default = []
+std     = ["sha2/std"]
+
+[dependencies]
+sha2 = { version = "0.10", default-features = false }
