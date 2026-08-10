@@ -15,6 +15,12 @@ use sha2::{Digest, Sha256};
 
 use crate::Difficulty;
 
+/// Width of a hashcash solution: a 64-bit nonce.
+///
+/// Exported so [`crate::PowScheme::solution_len`] can be tied to it at compile
+/// time instead of the two drifting apart.
+pub const NONCE_LEN: usize = 8;
+
 /// Does `nonce` solve `input` at `difficulty`?
 ///
 /// One hash and one 256-bit comparison — on the order of 100 ns, against the
@@ -41,7 +47,7 @@ pub fn verify(input: &[u8; 32], nonce: &[u8], difficulty: Difficulty) -> bool {
 /// # Panics
 ///
 /// If `difficulty` is 0, which no solution can satisfy.
-pub fn solve(input: &[u8; 32], difficulty: Difficulty) -> [u8; 8] {
+pub fn solve(input: &[u8; 32], difficulty: Difficulty) -> [u8; NONCE_LEN] {
     assert!(difficulty > 0, "difficulty 0 is unsatisfiable");
     for n in 0u64.. {
         let nonce = n.to_be_bytes();
