@@ -58,6 +58,39 @@ impl PowScheme {
         }
     }
 
+    /// How many units of raw scheme work one unit of `difficulty` buys.
+    ///
+    /// The lane carries ONE difficulty for every scheme, and the retarget
+    /// controller moves that single number. Without normalisation the same `T`
+    /// means wildly different work per scheme: at `T = 10_000` MinRoot cost a
+    /// client ~1.4 s of sequential modexps, while raw hashcash costs ~1.4 ms —
+    /// a thousandfold gap under one number, which would silently gut the
+    /// anti-spam budget the controller was calibrated against the moment a
+    /// client switched schemes.
+    ///
+    /// 1024 was measured, not guessed: ~140 µs per unit `T` for MinRoot
+    /// against ~0.136 µs for hashcash, so ~1029 — rounded to a power of two.
+    ///
+    /// Verification is unaffected: it is a single hash and a 256-bit compare,
+    /// ~0.1 µs at ANY difficulty. Raising the multiplier costs the node
+    /// nothing, which is the asymmetry proof-of-work is supposed to provide
+    /// and the retired scheme did not (its verify was 0.2–0.7 ms, itself a
+    /// denial-of-service surface).
+    pub const fn work_multiplier(self) -> u64 {
+        match self {
+            // Its own native unit: one iteration of the sequential map.
+            Self::MinRoot => 1,
+            Self::Hashcash => 1024,
+        }
+    }
+
+    /// The raw scheme work one lane-level `difficulty` buys, saturating rather
+    /// than wrapping — a wrap would turn a difficulty INCREASE into a
+    /// catastrophic decrease.
+    pub const fn effective_difficulty(self, difficulty: Difficulty) -> Difficulty {
+        difficulty.saturating_mul(self.work_multiplier())
+    }
+
     /// Is `solution` well-formed for `input` at `difficulty`?
     ///
     /// Shape is checked before anything expensive. `MinRoot` always answers
@@ -71,7 +104,9 @@ impl PowScheme {
         }
         match self {
             Self::MinRoot => false,
-            Self::Hashcash => hashcash::verify(input, solution, difficulty),
+            Self::Hashcash => {
+                hashcash::verify(input, solution, self.effective_difficulty(difficulty))
+            }
         }
     }
 
@@ -100,8 +135,9 @@ impl PowScheme {
     /// let input = [0x11u8; 32];
     /// let mut solution = [0u8; 8];
     /// assert_eq!(solution.len(), scheme.solution_len());
-    /// assert!(scheme.solve_into(&input, 1_024, &mut solution));
-    /// assert!(scheme.verify(&input, &solution, 1_024));
+    /// // Small T on purpose: effective work is T x work_multiplier().
+    /// assert!(scheme.solve_into(&input, 4, &mut solution));
+    /// assert!(scheme.verify(&input, &solution, 4));
     /// ```
     pub fn solve_into(self, input: &[u8; 32], difficulty: Difficulty, out: &mut [u8]) -> bool {
         if out.len() != self.solution_len() || difficulty == 0 {
@@ -112,7 +148,10 @@ impl PowScheme {
             // forgeable proof would defeat the point of retiring it.
             Self::MinRoot => false,
             Self::Hashcash => {
-                out.copy_from_slice(&hashcash::solve(input, difficulty));
+                out.copy_from_slice(&hashcash::solve(
+                    input,
+                    self.effective_difficulty(difficulty),
+                ));
                 true
             }
         }
@@ -149,6 +188,8 @@ mod tests {
     #[test]
     fn the_solution_width_is_exact() {
         let t = 1_024;
+        // Raw solve: this asserts WIDTH, so it deliberately skips the
+        // multiplier and stays cheap.
         let nonce = hashcash::solve(&INPUT, t);
         let mut padded = [0u8; 9];
         padded[..8].copy_from_slice(&nonce);
@@ -174,7 +215,7 @@ mod tests {
     #[test]
     fn solve_into_round_trips_through_verify() {
         let scheme = PowScheme::Hashcash;
-        let t = 2_048;
+        let t = 4;
         let mut out = [0u8; 8];
         assert_eq!(out.len(), scheme.solution_len());
         assert!(scheme.solve_into(&INPUT, t, &mut out));
@@ -203,14 +244,66 @@ mod tests {
         let scheme = PowScheme::Hashcash;
         let mut short = [0u8; 7];
         let mut long = [0u8; 9];
-        assert!(!scheme.solve_into(&INPUT, 64, &mut short));
-        assert!(!scheme.solve_into(&INPUT, 64, &mut long));
+        assert!(!scheme.solve_into(&INPUT, 4, &mut short));
+        assert!(!scheme.solve_into(&INPUT, 4, &mut long));
         assert_eq!(short, [0u8; 7]);
         assert_eq!(long, [0u8; 9]);
         // Difficulty 0 is unsolvable, and must not panic the way the bare
         // hashcash::solve does — the generic entry point answers instead.
         let mut ok = [0u8; 8];
         assert!(!scheme.solve_into(&INPUT, 0, &mut ok));
+    }
+
+    /// The multiplier must be applied by BOTH sides or not at all. If solve
+    /// and verify disagreed, the solution would be well-formed and simply
+    /// never admitted — the silent failure this crate exists to prevent. This
+    /// pins that they agree by construction: a solution produced at `t`
+    /// verifies at `t`, and one produced at RAW `t` (multiplier skipped, as a
+    /// stale client would) does not.
+    #[test]
+    fn the_multiplier_is_applied_on_both_sides() {
+        let scheme = PowScheme::Hashcash;
+        let t = 4;
+        let mut out = [0u8; 8];
+        assert!(scheme.solve_into(&INPUT, t, &mut out));
+        assert!(scheme.verify(&INPUT, &out, t));
+
+        // A raw solve at the same nominal t is 1024x too easy, so it must not
+        // pass the scheme-level check. (Probabilistic: a raw solution clears
+        // the harder target only with chance 1/1024, so pick one that doesn't.)
+        let mut raw_rejected = false;
+        for seed in 0u8..8 {
+            let mut input = INPUT;
+            input[0] = seed;
+            let raw = hashcash::solve(&input, t);
+            if !scheme.verify(&input, &raw, t) {
+                raw_rejected = true;
+                break;
+            }
+        }
+        assert!(
+            raw_rejected,
+            "a solution that skipped the multiplier must not verify"
+        );
+    }
+
+    /// The multiplier is a wire-affecting constant: changing it invalidates
+    /// every solution in flight and silently reprices the whole lane, so it is
+    /// pinned by value rather than merely being read from the source.
+    #[test]
+    fn the_multipliers_are_pinned() {
+        assert_eq!(PowScheme::MinRoot.work_multiplier(), 1);
+        assert_eq!(PowScheme::Hashcash.work_multiplier(), 1024);
+        assert_eq!(PowScheme::Hashcash.effective_difficulty(10_000), 10_240_000);
+    }
+
+    /// Saturating, not wrapping. A wrap would turn a difficulty INCREASE into
+    /// a catastrophic decrease — the retarget controller raising T would make
+    /// the lane easier, which is the worst possible direction to fail.
+    #[test]
+    fn effective_difficulty_saturates() {
+        assert_eq!(PowScheme::Hashcash.effective_difficulty(u64::MAX), u64::MAX);
+        assert_eq!(PowScheme::MinRoot.effective_difficulty(u64::MAX), u64::MAX);
     }
 
     /// Difficulty 0 is never satisfiable — a target divisor of zero would

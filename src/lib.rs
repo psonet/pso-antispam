@@ -50,7 +50,13 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-pub mod hashcash;
+// Crate-private ON PURPOSE. Its `solve`/`verify` take the EFFECTIVE difficulty
+// (already multiplied); a caller handing them a lane-level `T` would produce a
+// solution 1024x too easy that `PowScheme::verify` rejects — and rejects
+// silently, since an unadmitted transaction reports nothing. Routing every
+// caller through `PowScheme` makes that mistake unrepresentable rather than
+// merely documented.
+pub(crate) mod hashcash;
 pub mod params;
 pub mod policy;
 pub mod scheme;
