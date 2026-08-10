@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.4.0 - 2026-08-10
+#### Features
+- <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>retune the hashcash multiplier to 128 (#7) - (c1154a7) - Velichko Anton
+
+- - -
+
 ## v0.3.0 - 2026-08-10
 #### Features
 - <span style="background-color: #d73a49; color: white; padding: 2px 6px; border-radius: 3px; font-weight: bold; font-size: 0.85em;">BREAKING</span>normalise scheme work with a per-scheme multiplier (#6) - (9a9204e) - Velichko Anton
