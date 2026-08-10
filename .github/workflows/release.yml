@@ -1,0 +1,292 @@
+name: release
+
+# The TAG -> PUBLISH half, split out from ci.yml. Reacts to a `v*` tag — cut
+# either by ci.yml's cog auto-bump on a main merge, or by a maintainer pushing
+# one by hand — and to a manual dispatch for re-releasing an existing tag.
+#
+#   push: tags v*     -> resolve -> publish -> github-release -> verify-release
+#   workflow_dispatch -> the same, against the `tag` input
+#
+# ci.yml pushes the bump tag with PSONET_REPO_TOKEN (a PAT), not the default
+# GITHUB_TOKEN: only a PAT-authored tag push fires this workflow. See ci.yml.
+#
+# No lint or tests here. The commit the tag points at already passed ci.yml
+# before the tag existed, so re-running them would only add a way for a release
+# to fail for a reason unrelated to the release.
+
+on:
+  push:
+    tags: [ "v*" ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: >-
+          Existing tag to (re-)release, e.g. "v0.1.0".
+        required: true
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ----------------------------------------------------------------
+  # One place that answers "which tag are we releasing?", so no later
+  # job has to re-derive it from two possible triggers.
+  # ----------------------------------------------------------------
+  resolve:
+    name: Resolve release tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.r.outputs.tag }}
+    steps:
+      - id: r
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="$REF_NAME"
+          fi
+          case "$tag" in
+            v*) ;;
+            *) echo "::error::refusing to release '$tag' — expected a v-prefixed tag"; exit 1 ;;
+          esac
+          echo "tag=${tag}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+  # ----------------------------------------------------------------
+  # Publish (cog flow).
+  # ----------------------------------------------------------------
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    needs: [resolve]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: cargo
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          cargo publish --verbose --token "${CARGO_REGISTRY_TOKEN}"
+
+      # Re-create the .crate locally. `cargo publish` cleans up
+      # target/package/*.crate after a successful upload; `cargo
+      # package --no-verify` is fast (skips the re-build) and
+      # deterministic given the same source tree, so the resulting
+      # bytes match what crates.io just received.
+      - name: Re-package .crate for artifact upload
+        if: success()
+        run: cargo package --no-verify
+
+      # Upload the byte-identical `.crate` as a workflow artifact so
+      # the `github-release` job can attach it to the GH Release
+      # alongside the crates.io copy. Signing in a follow-up commit
+      # will produce one sigstore signature that verifies both the
+      # GH-Release-attached and crates.io copies.
+      - name: Upload .crate as workflow artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crate-tarball
+          path: target/package/*.crate
+          if-no-files-found: error
+          retention-days: 1
+
+  # ----------------------------------------------------------------
+  # GitHub release.
+  # ----------------------------------------------------------------
+
+  # ----------------------------------------------------------------
+  # GitHub release.
+  # ----------------------------------------------------------------
+  github-release:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+    needs: [resolve, publish]
+    # id-token + attestations widen this job's scope so cosign keyless +
+    # actions/attest-build-provenance can mint an OIDC token and write to
+    # the GitHub attestation store. Workflow-level perms stay narrower.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      - name: Download .crate artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: crate-tarball
+          path: dist/
+
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          shasum -a 256 -- *.crate > SHA256SUMS
+          echo "---"
+          cat SHA256SUMS
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # pin-target: v3
+
+      - name: Sign release artifacts (cosign keyless)
+        run: |
+          set -euo pipefail
+          cd dist
+          for f in *; do
+            [ -f "$f" ] || continue
+            case "$f" in *.sig|*.pem) continue ;; esac
+            echo "Signing $f"
+            cosign sign-blob --yes \
+              --output-signature "${f}.sig" \
+              --output-certificate "${f}.pem" \
+              "$f"
+          done
+          ls -la
+
+      - name: Generate SLSA build provenance
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # pin-target: v2
+        with:
+          subject-path: |
+            dist/*.crate
+            dist/SHA256SUMS
+
+      - name: Compose release body
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Install"
+            echo
+            echo "    cargo add pso-antispam@${TAG#v}"
+            echo
+            echo "## Artifacts"
+            echo
+            echo "- \`pso-antispam-${TAG#v}.crate\` — byte-identical to the crates.io upload."
+            echo "- \`SHA256SUMS\` — SHA-256 of the .crate."
+            echo "- \`*.sig\` + \`*.pem\` — sigstore cosign keyless signature + Fulcio cert per artifact."
+            echo
+            echo "## Verification"
+            echo
+            echo "See [SECURITY.md](https://github.com/psonet/pso-antispam/blob/main/SECURITY.md) for the verify recipe."
+            echo
+            echo "## CI"
+            echo
+            echo "- crates.io publish: ${PUBLISH_RESULT}"
+          } > RELEASE_BODY.md
+          cat RELEASE_BODY.md
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve.outputs.tag }}
+          name: ${{ needs.resolve.outputs.tag }}
+          body_path: RELEASE_BODY.md
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+          files: |
+            dist/*.crate
+            dist/*.sig
+            dist/*.pem
+            dist/SHA256SUMS
+
+  # ----------------------------------------------------------------
+  # verify-release: post-publish smoke test. Re-downloads every asset
+  # of the release we just cut and runs `cosign verify-blob` against
+  # each one. Hard-fails the workflow on any bad signature — this is
+  # the regression test for both the action SHA pins and the cert-
+  # identity regex below.
+  # ----------------------------------------------------------------
+
+  # ----------------------------------------------------------------
+  # verify-release: post-publish smoke test. Re-downloads every asset
+  # of the release we just cut and runs `cosign verify-blob` against
+  # each one. Hard-fails the workflow on any bad signature — this is
+  # the regression test for both the action SHA pins and the cert-
+  # identity regex below.
+  # ----------------------------------------------------------------
+  verify-release:
+    name: Verify signed release
+    runs-on: ubuntu-latest
+    needs: [resolve, publish, github-release]
+    if: needs.github-release.result == 'success' && needs.publish.result == 'success'
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # pin-target: v3
+
+      - name: Download release assets
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p verify
+          gh release download "$TAG" --dir verify --repo "${{ github.repository }}"
+          ls -la verify/
+
+      - name: Verify cosign signatures
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cd verify
+          # Tags only. Signing happens exclusively on the tag-triggered
+          # release path now, so accepting a `heads/main` identity would widen
+          # what a signature proves for no reason.
+          IDENTITY_RE='^https://github\.com/psonet/pso-antispam/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'
+          OIDC_ISSUER='https://token.actions.githubusercontent.com'
+          failed=0
+          shopt -s nullglob
+          for f in *; do
+            [ -f "$f" ] || continue
+            case "$f" in *.sig|*.pem) continue ;; esac
+            if [ ! -f "${f}.sig" ] || [ ! -f "${f}.pem" ]; then
+              echo "::error::missing ${f}.sig or ${f}.pem alongside ${f}"
+              failed=1
+              continue
+            fi
+            echo "Verifying $f"
+            if cosign verify-blob \
+                --certificate "${f}.pem" \
+                --signature "${f}.sig" \
+                --certificate-identity-regexp "$IDENTITY_RE" \
+                --certificate-oidc-issuer "$OIDC_ISSUER" \
+                "$f"; then
+              echo "  OK $f"
+            else
+              echo "::error::cosign verify-blob FAILED for $f"
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::one or more release artifacts failed signature verification"
+            exit 1
+          fi
+          echo "All artifacts verified."
