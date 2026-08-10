@@ -68,8 +68,17 @@ impl PowScheme {
     /// anti-spam budget the controller was calibrated against the moment a
     /// client switched schemes.
     ///
-    /// 1024 was measured, not guessed: ~140 µs per unit `T` for MinRoot
-    /// against ~0.136 µs for hashcash, so ~1029 — rounded to a power of two.
+    /// 128 is a deliberate step BELOW strict parity with MinRoot, which
+    /// measured ~1029. Parity was the first choice, and measuring it properly
+    /// killed it: at ×1024 one unit of `T` costs ~0.13 ms, so the configured
+    /// floor (`T = 10_000`) is ~1.3 s and `T_BASE` ~13.5 s of client work — on
+    /// a desktop core, with a geometric tail putting the unlucky case near 40 s.
+    /// A phone is no faster. That is not a transaction a wallet can ship.
+    ///
+    /// ×128 puts the floor at ~0.17 s and `T_BASE` at ~1.7 s, which a wallet
+    /// can absorb. The lane is 8× cheaper to spam than MinRoot nominally was —
+    /// but MinRoot's cost was FORGEABLE, so its real price was zero. 128 hashes
+    /// per unit that an attacker must actually pay beats 1029 they could skip.
     ///
     /// Verification is unaffected: it is a single hash and a 256-bit compare,
     /// ~0.1 µs at ANY difficulty. Raising the multiplier costs the node
@@ -80,7 +89,7 @@ impl PowScheme {
         match self {
             // Its own native unit: one iteration of the sequential map.
             Self::MinRoot => 1,
-            Self::Hashcash => 1024,
+            Self::Hashcash => 128,
         }
     }
 
@@ -268,9 +277,9 @@ mod tests {
         assert!(scheme.solve_into(&INPUT, t, &mut out));
         assert!(scheme.verify(&INPUT, &out, t));
 
-        // A raw solve at the same nominal t is 1024x too easy, so it must not
+        // A raw solve at the same nominal t is 128x too easy, so it must not
         // pass the scheme-level check. (Probabilistic: a raw solution clears
-        // the harder target only with chance 1/1024, so pick one that doesn't.)
+        // the harder target only with chance 1/128, so pick one that doesn't.)
         let mut raw_rejected = false;
         for seed in 0u8..8 {
             let mut input = INPUT;
@@ -293,8 +302,8 @@ mod tests {
     #[test]
     fn the_multipliers_are_pinned() {
         assert_eq!(PowScheme::MinRoot.work_multiplier(), 1);
-        assert_eq!(PowScheme::Hashcash.work_multiplier(), 1024);
-        assert_eq!(PowScheme::Hashcash.effective_difficulty(10_000), 10_240_000);
+        assert_eq!(PowScheme::Hashcash.work_multiplier(), 128);
+        assert_eq!(PowScheme::Hashcash.effective_difficulty(10_000), 1_280_000);
     }
 
     /// Saturating, not wrapping. A wrap would turn a difficulty INCREASE into
