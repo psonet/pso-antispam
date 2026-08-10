@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file. See [conventional commits](https://www.conventionalcommits.org/) for commit guidelines.
 
 - - -
+## v0.2.1 - 2026-08-10
+#### Bug Fixes
+- (**ci**) make the crates.io publish a no-op when already uploaded - (8daf221) - Anton Velichko
+
+- - -
+
 ## v0.2.0 - 2026-08-10
 #### Features
 - solve through PowScheme, not only verify (#4) - (e4fe948) - Velichko Anton
