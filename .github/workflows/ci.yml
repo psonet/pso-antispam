@@ -82,6 +82,15 @@ jobs:
     name: Commit lint (conventional-commits)
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
+    # Declaring ANY top-level `permissions:` sets every unlisted scope to
+    # `none`, so the workflow-level `contents: write` silently left this job
+    # unable to list the PR's commits — it failed with "Resource not accessible
+    # by integration", which reads like a bad commit message rather than a
+    # missing scope. Only surfaces on a pull_request, so a repo that pushes
+    # straight to main never sees it.
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:
