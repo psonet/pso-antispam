@@ -1,5 +1,10 @@
 //! Hashcash over SHA-256, with a 256-bit target.
 //!
+//! **Internal.** Everything here takes the EFFECTIVE difficulty — already
+//! scaled by [`crate::PowScheme::work_multiplier`]. Callers go through
+//! [`crate::PowScheme`], which applies that scaling on both the solve and the
+//! verify side so the two cannot disagree.
+//!
 //! A solution is a 64-bit nonce such that
 //! `SHA-256(input ‖ nonce)`, read big-endian, is at most `2^256 / T`.
 //!

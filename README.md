@@ -26,7 +26,7 @@ test suite      ─┘
 | Module | Contents |
 |---|---|
 | `scheme` | `PowScheme` — wire tag, exact solution width, `verify` |
-| `hashcash` | SHA-256 hashcash with a 256-bit target: `verify`, `solve` |
+| `hashcash` | SHA-256 hashcash with a 256-bit target (internal — reached via `PowScheme`) |
 | `params` | `derive_input_from` (the binding), `is_block_valid` (the window) |
 | `policy` | `T_BASE`, `MAX_DIFFICULTY_ADJUSTMENT_PCT`, `EPOCH_LENGTH_BLOCKS`, `PROOF_VALIDITY_WINDOW` |
 
@@ -58,6 +58,22 @@ all. It comes from the input binding plus the block window, both unchanged by th
 scheme swap. That is exactly why they belong here rather than beside any one
 algorithm.
 
+## One difficulty, comparable work
+
+The lane carries a single `T` and the retarget controller moves that one
+number — but raw schemes cost wildly different amounts per unit. At
+`T = 10 000` MinRoot cost a client ~1.4 s of sequential modexps while raw
+hashcash costs ~1.4 ms, a thousandfold gap under one number.
+
+`PowScheme::work_multiplier()` normalises that (hashcash ×1024, measured:
+~140 µs per unit `T` for MinRoot against ~0.136 µs for hashcash). It is applied
+**inside** `verify` and `solve_into`, so the two sides cannot drift — which is
+why `hashcash` is not public: handing its raw API a lane-level `T` would produce
+a solution that is silently never admitted.
+
+Verification is unaffected at ~0.1 µs for any difficulty, so raising the
+multiplier costs the node nothing.
+
 ## Difficulty is a target divisor
 
 `T` means "a solution must hash below `2^256 / T`", so expected work is
@@ -65,8 +81,13 @@ proportional to `T`. The retired VDF used the same type as a count of sequential
 steps.
 
 **Same number, different meaning** — anything that treated difficulty as elapsed
-time is now wrong. In exchange the cost collapses: at `T = 100_000`, solving is
-sub-millisecond, where MinRoot at 10 000 cost an honest wallet over a second.
+time is now wrong.
+
+Cost is quoted in EFFECTIVE work, i.e. after the multiplier above. At the
+configured floor `T = 10 000`, hashcash does ~10.2M hashes — roughly half a
+second on a desktop core, deliberately the same order as the MinRoot cost the
+lane was calibrated against. Raw hashcash at that `T` would be ~1.4 ms, which is
+why the multiplier exists.
 
 A 256-bit target rather than leading-zero bits is deliberate. Bits quantise
 difficulty to powers of two, and the retarget controller moves `T` by up to ±25%
