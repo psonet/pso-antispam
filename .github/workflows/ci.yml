@@ -7,10 +7,11 @@ name: CI
 #   push:main     the same, then `tag` (cog --auto) if the commits warrant a bump
 #   schedule      nightly cargo-deny at 04:00 UTC to surface fresh advisories
 #
-# The tag it pushes is what fires release.yml (TAG -> crates.io + GH release).
-# That hand-off only works because the tag is pushed with a PAT: a tag pushed
-# with the default GITHUB_TOKEN does NOT trigger another workflow, by design,
-# so the release would silently never run.
+# The tag it cuts is what starts release.yml (TAG -> crates.io + GH release).
+# GitHub will not trigger a workflow from a push authenticated with the default
+# GITHUB_TOKEN — that is how it stops workflows recursing — so the tag job
+# DISPATCHES release.yml explicitly instead. That needs `actions: write`, and it
+# keeps the whole flow on GITHUB_TOKEN rather than a PAT.
 
 on:
   push:
@@ -26,6 +27,7 @@ concurrency:
 
 permissions:
   contents: write # the cog bump commit + tag push on main
+  actions: write # the tag job dispatches release.yml after a bump
 
 env:
   CARGO_TERM_COLOR: always
@@ -241,8 +243,8 @@ jobs:
 
   # ----------------------------------------------------------------
   # The hand-off to release.yml. cog decides the bump from the
-  # conventional-commit history; if it cuts a tag, pushing that tag is
-  # what starts the release half.
+  # conventional-commit history; if it cuts a tag, this job starts the
+  # release half explicitly.
   # ----------------------------------------------------------------
   tag:
     name: Bump version & tag
@@ -253,40 +255,56 @@ jobs:
       github.ref == 'refs/heads/main' &&
       !startsWith(github.event.head_commit.message, 'chore(version):') &&
       !contains(github.event.head_commit.message, '[skip ci]')
-    outputs:
-      tag: ${{ steps.bump.outputs.tag }}
     steps:
-      # PSONET_REPO_TOKEN, not GITHUB_TOKEN. A push authenticated with the
-      # default token never triggers another workflow — GitHub blocks that to
-      # stop workflows recursing — so a tag pushed with it would sit there and
-      # release.yml would never fire. The PAT is what makes the hand-off work.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.PSONET_REPO_TOKEN }}
+          # GITHUB_TOKEN carries contents:write from the workflow permissions
+          # above, which is what cog's post_bump_hooks push with.
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure git identity
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Cocogitto bump
-        uses: cocogitto/cocogitto-action@v4
+      # Install cog onto PATH. `check` also validates the commit history; the
+      # bump itself runs manually below.
+      - uses: cocogitto/cocogitto-action@v4
         with:
-          command: bump
-          args: --auto
-          git-user: "github-actions[bot]"
-          git-user-email: "41898282+github-actions[bot]@users.noreply.github.com"
+          command: check
 
-      - name: Resolve created tag (if any)
+      # Run the bump directly rather than through the action's `command: bump`,
+      # to neutralise cog.toml's `branch_whitelist`. The action invokes cog
+      # against the CI checkout's ref, which cog does not recognise as `main`,
+      # so the whitelist rejects with "bump is not allowed" before a single
+      # commit is scanned. The job-level `if:` already restricts this to a push
+      # on main, so dropping the in-cog branch guard changes nothing about when
+      # a bump can happen.
+      - name: Cocogitto bump
         id: bump
         run: |
           set -euo pipefail
+          cfg="$(mktemp -d)/cog.toml"
+          sed 's/^branch_whitelist.*/branch_whitelist = []/' cog.toml > "$cfg"
+          cog --config "$cfg" bump --auto
           tag="$(git tag --points-at HEAD | grep '^v' | head -n1 || true)"
-          echo "tag=${tag}"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          if [ -z "$tag" ]; then
-            echo "No version bump warranted by these commits; release.yml will not fire."
+          if [ -n "$tag" ]; then
+            echo "::notice::cut ${tag}"
           else
-            echo "Pushed $tag — release.yml takes it from here."
+            echo "::notice::no bump warranted on this push"
           fi
+
+      # A GITHUB_TOKEN-pushed tag cannot re-trigger a workflow, so start
+      # release.yml explicitly against the tag just cut.
+      - name: Trigger release (release.yml)
+        if: steps.bump.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.bump.outputs.tag }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml --repo "$REPO" --ref "$TAG" -f tag="$TAG"
+          echo "::notice::dispatched release.yml for ${TAG}"
