@@ -3,9 +3,9 @@ name: CI
 # The COMMIT -> TAG half. Everything that decides whether a commit is good, plus
 # the cog auto-bump that cuts the version tag on main. Nothing here publishes.
 #
-#   pull_request  cargo-deny + commitlint + lint + test + build
+#   pull_request  supply chain + commitlint + lint + test + build
 #   push:main     the same, then `tag` (cog --auto) if the commits warrant a bump
-#   schedule      nightly cargo-deny at 04:00 UTC to surface fresh advisories
+#   schedule      nightly supply-chain run at 04:00 UTC to surface fresh advisories
 #
 # The tag it cuts is what starts release.yml (TAG -> crates.io + GH release).
 # GitHub will not trigger a workflow from a push authenticated with the default
