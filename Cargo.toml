@@ -19,3 +19,10 @@ std     = ["sha2/std"]
 
 [dependencies]
 sha2 = { version = "0.10", default-features = false }
+
+# Rustdoc lints. An intra-doc link that stops resolving is a silent docs
+# regression — nothing reads the rendered output, so nothing notices. CI runs
+# `cargo doc` with `-D warnings`, which turns a dead [`Type`] link into a
+# build failure instead.
+[lints.rustdoc]
+all = "warn"
